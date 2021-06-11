@@ -1,0 +1,24 @@
+-- Verify 9-MDA-Lite:mda_lite_plans on pg
+
+BEGIN;
+
+SET search_path TO :"schema",public;
+
+SELECT 1/count(*)
+FROM pg_matviews
+WHERE matviewname = 'mda_lite_plans';
+
+SELECT
+  plan_id,
+  plan_title,
+  plan_name,
+  plan_status,
+  plan_date,
+  plan_effective_period_start,
+  plan_effective_period_end,
+  plan_intervention_type,
+  plan_version
+FROM mda_lite_plans
+WHERE FALSE;
+
+ROLLBACK;

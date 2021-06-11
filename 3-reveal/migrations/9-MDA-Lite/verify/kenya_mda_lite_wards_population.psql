@@ -1,0 +1,37 @@
+-- Verify 9-MDA-Lite:kenya_mda_lite_wards_population on pg
+
+BEGIN;
+
+SET search_path TO :"schema",public;
+
+SELECT 1/count(*)
+FROM pg_matviews
+WHERE matviewname = 'kenya_mda_lite_wards_population';
+
+SELECT
+  ward_id,
+  jurisdiction_id,
+  name,
+  official_population,
+  other_population,
+  jurisdiction_name_path,
+  jurisdiction_path
+FROM kenya_mda_lite_wards_population
+WHERE FALSE;
+
+SELECT 1/COUNT(*)
+FROM pg_catalog.pg_indexes
+WHERE
+schemaname = :'schema'
+AND tablename = 'kenya_mda_lite_wards_population'
+AND indexdef LIKE '%CREATE UNIQUE INDEX%'
+AND indexname = 'kenya_mda_lite_wards_population_idx';
+
+SELECT 1/COUNT(*)
+FROM pg_catalog.pg_indexes
+WHERE
+schemaname = :'schema'
+AND tablename = 'kenya_mda_lite_wards_population'
+AND indexname = 'kenya_mda_lite_wards_population_jurisdiction_idx';
+
+ROLLBACK;

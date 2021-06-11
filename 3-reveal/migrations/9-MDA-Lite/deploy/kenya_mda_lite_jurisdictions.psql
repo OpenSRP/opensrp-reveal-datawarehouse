@@ -1,0 +1,83 @@
+-- Deploy 9-MDA-Lite:kenya_mda_lite_jurisdictions to pg
+-- requires: 9-MDA-Lite:mda_lite_plans
+-- requires: reveal_database_views:jurisdictions_tree
+-- requires: 9-MDA-Lite:kenya_mda_lite_operational_areas
+-- requires: 9-MDA-Lite:kenya_mda_lite_wards_population
+-- requires: opensrp_settings
+
+BEGIN;
+
+SET search_path TO :"schema",public;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS kenya_mda_lite_jurisdictions AS
+SELECT DISTINCT ON (jurisdictions_query.jurisdiction_id, plans.plan_id)
+    public.uuid_generate_v5(
+        '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+        concat(jurisdictions_query.jurisdiction_id, plans.plan_id)) AS id,
+    plans.plan_id as plan_id,
+    jurisdictions_query.*,
+    COALESCE(ward_population.official_population, 0) AS official_population,
+    COALESCE(ward_population.other_pop_target, 0) AS other_pop_target,
+    CASE 
+        WHEN COALESCE(ward_population.official_population, 0) = 0 THEN 0
+        ELSE CAST(jurisdictions_query.total_all_genders AS DECIMAL)/CAST(ward_population.official_population AS DECIMAL)
+    END as treatment_coverage,
+    CASE 
+        WHEN COALESCE(ward_population.other_pop_target, 0) = 0 THEN 0
+        ELSE CAST(jurisdictions_query.total_all_genders AS DECIMAL)/CAST(ward_population.other_pop_target AS DECIMAL)
+    END as other_pop_coverage
+FROM mda_lite_plans as plans
+LEFT JOIN LATERAL (
+    SELECT
+      kenya_lite_jurisdictions.*
+    FROM kenya_mda_lite_operational_areas as jurisdictions
+    LEFT JOIN LATERAL (
+      SELECT
+          jurisdiction_id AS jurisdiction_id,
+          COALESCE(jurisdiction_parent_id, '') AS jurisdiction_parent_id,
+          jurisdiction_name AS jurisdiction_name,
+          jurisdiction_depth AS jurisdiction_depth,
+          jurisdiction_path AS jurisdiction_path,
+          jurisdiction_name_path AS jurisdiction_name_path,
+          kenya_op_areas.*
+      FROM jurisdictions_tree
+      LEFT JOIN LATERAL (
+        SELECT
+            COALESCE(sum(treated_male_1_4), 0) AS treated_male_1_4,
+            COALESCE(sum(treated_male_5_14), 0) AS treated_male_5_14,
+            COALESCE(sum(treated_male_above_15), 0) AS treated_male_above_15,
+            COALESCE(sum(treated_female_1_4), 0) AS treated_female_1_4,
+            COALESCE(sum(treated_female_5_14), 0) AS treated_female_5_14,
+            COALESCE(sum(treated_female_above_15), 0) AS treated_female_above_15,
+            COALESCE(sum(total_males), 0) AS total_males,
+            COALESCE(sum(total_females), 0) AS total_females,
+            COALESCE(sum(total_all_genders), 0) AS total_all_genders,
+            COALESCE(sum(supervisor_distributed), 0) AS supervisor_distributed,
+            COALESCE(sum(received_number), 0) AS received_number,
+            COALESCE(sum(adminstered), 0) AS adminstered,
+            COALESCE(sum(damaged), 0) AS damaged,
+            COALESCE(sum(adverse), 0) AS adverse,
+            COALESCE(sum(remaining_with_cdd), 0) AS remaining_with_cdd,
+            COALESCE(sum(returned_to_supervisor), 0) AS returned_to_supervisor
+        FROM kenya_mda_lite_operational_areas AS op_area
+        WHERE op_area.plan_id = plans.plan_id
+        AND op_area.jurisdiction_path @> ARRAY[jurisdictions_tree.jurisdiction_id]
+      ) AS kenya_op_areas ON TRUE
+      WHERE jurisdictions.jurisdiction_path @> ARRAY[jurisdictions_tree.jurisdiction_id]
+      AND jurisdictions_tree.jurisdiction_depth < 2
+    ) AS kenya_lite_jurisdictions ON TRUE
+) AS jurisdictions_query ON TRUE
+LEFT JOIN LATERAL (
+    SELECT
+        COALESCE(sum(official_population::INTEGER), 0) AS official_population,
+        COALESCE(sum(other_population::INTEGER), 0) AS other_pop_target
+    FROM kenya_mda_lite_wards_population
+    WHERE kenya_mda_lite_wards_population.jurisdiction_path @> ARRAY[jurisdictions_query.jurisdiction_id]
+) as ward_population ON TRUE;
+
+CREATE INDEX IF NOT EXISTS kenya_mda_lite_jurisdictions_plan_idx ON kenya_mda_lite_jurisdictions (plan_id);
+CREATE INDEX IF NOT EXISTS kenya_mda_lite_jurisdictions_jurisdiction_idx ON kenya_mda_lite_jurisdictions (jurisdiction_id);
+CREATE INDEX IF NOT EXISTS kenya_mda_lite_jurisdictions_jurisdiction_parent_idx ON kenya_mda_lite_jurisdictions (jurisdiction_parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS kenya_mda_lite_jurisdictions_idx ON kenya_mda_lite_jurisdictions (id);
+
+COMMIT;

@@ -1,0 +1,90 @@
+-- Deploy 9-MDA-Lite:kenya_mda_lite_wards to pg
+-- requires: 9-MDA-Lite:kenya_mda_lite_operational_areas
+-- requires: reveal_transaction_tables:events
+-- requires: reveal_transaction_tables:locations
+-- requires: 9-MDA-Lite:kenya_mda_lite_wards_population
+-- requires: opensrp_settings
+
+BEGIN;
+
+SET search_path TO :"schema",public;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS kenya_mda_lite_wards AS
+SELECT
+    subq.*,
+    COALESCE(wards_population.official_population::INTEGER, 0) AS official_population,
+    COALESCE(wards_population.other_population::INTEGER, 0) AS other_pop_target,
+    CASE
+        WHEN COALESCE(wards_population.official_population::INTEGER, 0) = 0 THEN 0
+        ELSE CAST(subq.total_all_genders as DECIMAL) / CAST(wards_population.official_population as DECIMAL) 
+    END AS treatment_coverage,
+    CASE
+        WHEN COALESCE(wards_population.other_population::INTEGER, 0) = 0 THEN 0
+        ELSE CAST(subq.total_all_genders as DECIMAL) / CAST(wards_population.other_population as DECIMAL)
+    END AS other_pop_coverage
+FROM (
+    SELECT
+        public.uuid_generate_v5(
+                '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+                concat(events.base_entity_id, parents.jurisdiction_id, parents.plan_id)
+            ) AS id,
+        locations.name AS ward_name,
+        parents.jurisdiction_id AS parent_id,
+        events.base_entity_id,
+        parents.plan_id AS plan_id,
+        SUM(COALESCE (events.form_data->'treated_male_1_to_4'->>0, '0')::int) AS treated_male_1_4,
+        SUM(COALESCE (events.form_data->'treated_male_5_to_14'->>0, '0')::int) AS treated_male_5_14,
+        SUM(COALESCE (events.form_data->'treated_male_above_15'->>0, '0')::int) AS treated_male_above_15,
+
+        SUM(COALESCE (events.form_data->'treated_female_1_to_4'->>0, '0')::int) AS treated_female_1_4,
+        SUM(COALESCE (events.form_data->'treated_female_5_to_14'->>0, '0')::int) AS treated_female_5_14,
+        SUM(COALESCE (events.form_data->'treated_female_above_15'->>0, '0')::int) AS treated_female_above_15,
+
+        SUM(COALESCE (events.form_data->'treated_male_1_to_4'->>0, '0')::int +
+        COALESCE (events.form_data->'treated_male_5_to_14'->>0, '0')::int +
+        COALESCE (events.form_data->'treated_male_above_15'->>0, '0')::int) AS total_males,
+
+        SUM(COALESCE (events.form_data->'treated_female_1_to_4'->>0, '0')::int +
+        COALESCE (events.form_data->'treated_female_5_to_14'->>0, '0')::int +
+        COALESCE (events.form_data->'treated_female_above_15'->>0, '0')::int) AS total_females,
+
+        SUM(COALESCE (events.form_data->'treated_male_1_to_4'->>0, '0')::int +
+        COALESCE (events.form_data->'treated_male_5_to_14'->>0, '0')::int +
+        COALESCE (events.form_data->'treated_male_above_15'->>0, '0')::int +
+        COALESCE (events.form_data->'treated_female_1_to_4'->>0, '0')::int +
+        COALESCE (events.form_data->'treated_female_5_to_14'->>0, '0')::int +
+        COALESCE (events.form_data->'treated_female_above_15'->>0, '0')::int) AS total_all_genders,
+
+        SUM(COALESCE (events.form_data->'sum_pzq_received_and_top_up'->>0, '0')::int +
+        COALESCE (events.form_data->'sum_alb_received_and_top_up'->>0, '0')::int +
+        COALESCE (events.form_data->'sum_mbz_received_and_top_up'->>0, '0')::int) AS supervisor_distributed,
+
+        SUM(COALESCE (events.form_data->'received_number'->>0, '0')::int) AS received_number,
+        SUM(COALESCE (events.form_data->'adminstered'->>0, '0')::int) AS adminstered,
+        SUM(COALESCE (events.form_data->'damaged'->>0, '0')::int) AS damaged,
+        SUM(COALESCE (events.form_data->'adverse'->>0, '0')::int) AS adverse,
+
+        SUM(COALESCE (events.form_data->'received_number'->>0, '0')::int -
+        (COALESCE (events.form_data->'adminstered'->>0, '0')::int +
+        COALESCE (events.form_data->'damaged'->>0, '0')::int)) AS remaining_with_cdd,
+
+        SUM(COALESCE (events.form_data->'pzq_returned'->>0, '0')::int +
+        COALESCE (events.form_data->'albendazole_returned'->>0, '0')::int +
+        COALESCE (events.form_data->'mebendazole_returned'->>0, '0')::int) AS returned_to_supervisor
+    FROM events
+    LEFT JOIN locations ON events.base_entity_id = locations.id
+    LEFT JOIN kenya_mda_lite_operational_areas AS parents ON locations.jurisdiction_id = parents.jurisdiction_id
+    WHERE events.event_type IN ('tablet_accountability', 'cdd_supervisor_daily_summary')
+    AND events.entity_type = 'Structure'
+    AND parents.plan_id = events.plan_id
+    GROUP BY events.base_entity_id, locations.name, parents.jurisdiction_id, parents.plan_id
+) as subq
+LEFT JOIN kenya_mda_lite_wards_population as wards_population
+    ON wards_population.ward_id = subq.base_entity_id;
+
+CREATE INDEX IF NOT EXISTS kenya_mda_lite_wards_base_entity_id_idx ON kenya_mda_lite_wards (base_entity_id);
+CREATE INDEX IF NOT EXISTS kenya_mda_lite_wards_plan_id_idx ON kenya_mda_lite_wards (plan_id);
+CREATE INDEX IF NOT EXISTS kenya_mda_lite_wards_parent_id_idx ON kenya_mda_lite_wards (parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS kenya_mda_lite_wards_id_idx ON kenya_mda_lite_wards (id);
+
+COMMIT;

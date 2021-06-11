@@ -1,0 +1,12 @@
+%syntax-version=1.0.0
+%project=9-MDA-Lite
+%uri=https://github.com/OpenSRP/opensrp-reveal-datawarehouse/tree/master/3-reveal/migrations/9-MDA-Lite
+
+mda_lite_plans [reveal_transaction_tables:plans] 2021-04-06T15:00:20Z Ona,,, <ona@ona-ThinkPad-T470> # MDA Lite plans
+kenya_mda_lite_wards_population [reveal_transaction_tables:locations reveal_database_views:jurisdictions_tree reveal_transaction_tables:opensrp_settings] 2021-05-03T13:34:59Z Ona,,, <ona@ona-ThinkPad-T470> # Kenya ward level official and unofficial population
+kenya_mda_lite_structures [mda_lite_plans reveal_transaction_tables:events reveal_transaction_tables:tasks] 2021-03-02T07:13:48Z Lincoln Simba <lincolnsimba@Lincolns-MacBook-Pro.local> # MDA LITE
+kenya_mda_lite_operational_areas [kenya_mda_lite_structures reveal_database_views:jurisdictions_tree kenya_mda_lite_wards_population] 2021-03-10T12:42:27Z Lincoln Simba <lincolnsimba@Lincolns-MBP> # Add kenya_mda_lite_operational_areas
+kenya_mda_lite_wards [kenya_mda_lite_operational_areas reveal_transaction_tables:events reveal_transaction_tables:locations kenya_mda_lite_wards_population] 2021-03-31T17:27:43Z Lincoln Simba <lincolnsimba@Lincolns-MacBook-Pro.local> # MDA Lite wards
+kenya_mda_lite_cdd_supervisor [reveal_transaction_tables:events] 2021-04-06T13:36:32Z Ona,,, <ona@ona-ThinkPad-T470> # MDA Lite supervisor aggregations
+ward_drug_distribution [reveal_transaction_tables:events] 2021-04-08T17:28:05Z Ona,,, <ona@ona-ThinkPad-T470> # CDD drug distribution report
+kenya_mda_lite_jurisdictions [mda_lite_plans reveal_database_views:jurisdictions_tree kenya_mda_lite_operational_areas kenya_mda_lite_wards_population] 2021-04-20T10:29:07Z Ona,,, <ona@ona-ThinkPad-T470> # kenya mda lite jurisdictions report

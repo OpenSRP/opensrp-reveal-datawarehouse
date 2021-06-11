@@ -1,0 +1,35 @@
+-- Verify 9-MDA-Lite:kenya_mda_lite_cdd_supervisor on pg
+
+BEGIN;
+
+SET search_path TO :"schema",public;
+
+SELECT 1/count(*)
+FROM pg_matviews
+WHERE matviewname = 'supervisor_drug_distribution';
+
+SELECT
+    id,
+    supervisor_name,
+    base_entity_id,
+    plan_id,
+    treated_male_1_4,
+    treated_male_5_14,
+    treated_male_above_15,
+    treated_female_1_4,
+    treated_female_5_14,
+    treated_female_above_15,
+    total_males,
+    total_females,
+    total_all_genders,
+    supervisor_distributed,
+    received_number,
+    adminstered,
+    damaged,
+    adverse,
+    remaining_with_cdd,
+    returned_to_supervisor
+FROM supervisor_drug_distribution
+WHERE FALSE;
+
+ROLLBACK;

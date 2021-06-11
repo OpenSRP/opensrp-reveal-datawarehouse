@@ -1,0 +1,170 @@
+-- Deploy 9-MDA-Lite:kenya_mda_lite_operational_areas to pg
+-- requires: 9-MDA-Lite:kenya_mda_lite_structures
+-- requires: 9-MDA-Lite:kenya_mda_lite_wards_population
+-- requires: reveal_database_views:jurisdictions_tree
+-- requires: opensrp_settings
+
+BEGIN;
+
+SET search_path TO :"schema",public;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS kenya_mda_lite_operational_areas AS
+SELECT
+    main_query.*
+FROM (
+    SELECT
+        public.uuid_generate_v5(
+            '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+            concat(operational_area_query.structure_jurisdiction_id, operational_area_query.plan_id)
+        ) AS id,
+        operational_area_query.plan_id as plan_id,
+        kenya_lite_jurisdictions.jurisdiction_id AS jurisdiction_id,
+        kenya_lite_jurisdictions.jurisdiction_parent_id AS jurisdiction_parent_id,
+        kenya_lite_jurisdictions.jurisdiction_name AS jurisdiction_name,
+        kenya_lite_jurisdictions.jurisdiction_depth AS jurisdiction_depth,
+        kenya_lite_jurisdictions.jurisdiction_path AS jurisdiction_path,
+        kenya_lite_jurisdictions.jurisdiction_name_path AS jurisdiction_name_path,
+        operational_area_query.treated_male_1_4 AS treated_male_1_4,
+        operational_area_query.treated_male_5_14 AS treated_male_5_14,
+        operational_area_query.treated_male_above_15 AS treated_male_above_15,
+        operational_area_query.treated_female_1_4 AS treated_female_1_4,
+        operational_area_query.treated_female_5_14 AS treated_female_5_14,
+        operational_area_query.treated_female_above_15 AS treated_female_above_15,
+        operational_area_query.total_males AS total_males,
+        operational_area_query.total_females AS total_females,
+        operational_area_query.total_all_genders AS total_all_genders,
+        operational_area_query.supervisor_distributed AS supervisor_distributed,
+        operational_area_query.received_number AS received_number,
+        operational_area_query.adminstered AS adminstered,
+        operational_area_query.damaged AS damaged,
+        operational_area_query.adverse AS adverse,
+        operational_area_query.remaining_with_cdd AS remaining_with_cdd,
+        operational_area_query.returned_to_supervisor AS returned_to_supervisor,
+        COALESCE(wards_population.official_population, 0) AS official_population,
+        CASE
+            WHEN COALESCE(wards_population.official_population, 0) = 0 THEN 0
+            ELSE CAST(operational_area_query.total_all_genders as DECIMAL) / CAST(wards_population.official_population as DECIMAL)
+        END AS treatment_coverage,
+        COALESCE(wards_population.other_population, 0) AS other_pop_target,
+        CASE
+            WHEN COALESCE(wards_population.other_population, 0) = 0 THEN 0
+            ELSE CAST(operational_area_query.total_all_genders as DECIMAL) / CAST(wards_population.other_population as DECIMAL)
+        END AS other_pop_coverage
+    FROM plans
+    LEFT JOIN (
+        SELECT
+            jurisdictions.plan_id,
+            jurisdictions.structure_jurisdiction_id,
+            COALESCE(sum(daily_summary.treated_male_1_4), 0) AS treated_male_1_4,
+            COALESCE(sum(daily_summary.treated_male_5_14), 0) AS treated_male_5_14,
+            COALESCE(sum(daily_summary.treated_male_above_15), 0) AS treated_male_above_15,
+            COALESCE(sum(daily_summary.treated_female_1_4), 0) AS treated_female_1_4,
+            COALESCE(sum(daily_summary.treated_female_5_14), 0) AS treated_female_5_14,
+            COALESCE(sum(daily_summary.treated_female_above_15), 0) AS treated_female_above_15,
+            COALESCE(sum(daily_summary.total_males), 0) AS total_males,
+            COALESCE(sum(daily_summary.total_females), 0) AS total_females,
+            COALESCE(sum(daily_summary.total_all_genders), 0) AS total_all_genders,
+            COALESCE(sum(daily_summary.supervisor_distributed), 0) AS supervisor_distributed,
+            COALESCE(sum(daily_summary.received_number), 0) AS received_number,
+            COALESCE(sum(daily_summary.adminstered), 0) AS adminstered,
+            COALESCE(sum(daily_summary.damaged), 0) AS damaged,
+            COALESCE(sum(daily_summary.adverse), 0) AS adverse,
+            COALESCE(sum(daily_summary.remaining_with_cdd), 0) AS remaining_with_cdd,
+            COALESCE(sum(daily_summary.returned_to_supervisor), 0) AS returned_to_supervisor
+        FROM (
+            SELECT
+                structures.plan_id,
+                structures.structure_jurisdiction_id
+            FROM kenya_mda_lite_structures AS structures
+            WHERE structures.plan_id IS NOT NULL
+            GROUP BY structures.plan_id, structures.structure_jurisdiction_id
+        ) AS jurisdictions
+        LEFT JOIN LATERAL (
+            SELECT
+                subq.treated_male_1_4 AS treated_male_1_4,
+                subq.treated_male_5_14 AS treated_male_5_14,
+                subq.treated_male_above_15 AS treated_male_above_15,
+                subq.treated_female_1_4 AS treated_female_1_4,
+                subq.treated_female_5_14 AS treated_female_5_14,
+                subq.treated_female_above_15 AS treated_female_above_15,
+                subq.total_males AS total_males,
+                subq.total_females AS total_females,
+                subq.total_all_genders AS total_all_genders,
+                subq.supervisor_distributed AS supervisor_distributed,
+                subq.received_number AS received_number,
+                subq.adminstered AS adminstered,
+                subq.damaged AS damaged,
+                subq.adverse AS adverse,
+                subq.remaining_with_cdd AS remaining_with_cdd,
+                subq.returned_to_supervisor AS returned_to_supervisor
+            FROM (
+                SELECT
+                    SUM(COALESCE (events.form_data->'treated_male_1_to_4'->>0, '0')::int) AS treated_male_1_4,
+                    SUM(COALESCE (events.form_data->'treated_male_5_to_14'->>0, '0')::int) AS treated_male_5_14,
+                    SUM(COALESCE (events.form_data->'treated_male_above_15'->>0, '0')::int) AS treated_male_above_15,
+
+                    SUM(COALESCE (events.form_data->'treated_female_1_to_4'->>0, '0')::int) AS treated_female_1_4,
+                    SUM(COALESCE (events.form_data->'treated_female_5_to_14'->>0, '0')::int) AS treated_female_5_14,
+                    SUM(COALESCE (events.form_data->'treated_female_above_15'->>0, '0')::int) AS treated_female_above_15,
+
+                    SUM(COALESCE (events.form_data->'treated_male_1_to_4'->>0, '0')::int +
+                    COALESCE (events.form_data->'treated_male_5_to_14'->>0, '0')::int +
+                    COALESCE (events.form_data->'treated_male_above_15'->>0, '0')::int) AS total_males,
+
+                    SUM(COALESCE (events.form_data->'treated_female_1_to_4'->>0, '0')::int +
+                    COALESCE (events.form_data->'treated_female_5_to_14'->>0, '0')::int +
+                    COALESCE (events.form_data->'treated_female_above_15'->>0, '0')::int) AS total_females,
+
+                    SUM(COALESCE (events.form_data->'treated_male_1_to_4'->>0, '0')::int +
+                    COALESCE (events.form_data->'treated_male_5_to_14'->>0, '0')::int +
+                    COALESCE (events.form_data->'treated_male_above_15'->>0, '0')::int +
+                    COALESCE (events.form_data->'treated_female_1_to_4'->>0, '0')::int +
+                    COALESCE (events.form_data->'treated_female_5_to_14'->>0, '0')::int +
+                    COALESCE (events.form_data->'treated_female_above_15'->>0, '0')::int) AS total_all_genders,
+
+                    SUM(COALESCE (events.form_data->'sum_pzq_received_and_top_up'->>0, '0')::int +
+                    COALESCE (events.form_data->'sum_alb_received_and_top_up'->>0, '0')::int +
+                    COALESCE (events.form_data->'sum_mbz_received_and_top_up'->>0, '0')::int) AS supervisor_distributed,
+
+                    SUM(COALESCE (events.form_data->'received_number'->>0, '0')::int) AS received_number,
+                    SUM(COALESCE (events.form_data->'adminstered'->>0, '0')::int) AS adminstered,
+                    SUM(COALESCE (events.form_data->'damaged'->>0, '0')::int) AS damaged,
+                    SUM(COALESCE (events.form_data->'adverse'->>0, '0')::int) AS adverse,
+
+                    SUM(COALESCE (events.form_data->'received_number'->>0, '0')::int -
+                    (COALESCE (events.form_data->'adminstered'->>0, '0')::int +
+                    COALESCE (events.form_data->'damaged'->>0, '0')::int)) AS remaining_with_cdd,
+
+                    SUM(COALESCE (events.form_data->'pzq_returned'->>0, '0')::int +
+                    COALESCE (events.form_data->'albendazole_returned'->>0, '0')::int +
+                    COALESCE (events.form_data->'mebendazole_returned'->>0, '0')::int) AS returned_to_supervisor
+                FROM events
+                WHERE jurisdictions.structure_jurisdiction_id  = events.location_id
+                AND events.plan_id = jurisdictions.plan_id
+                AND events.entity_type = 'Structure'
+                AND events.event_type IN ('cdd_supervisor_daily_summary', 'tablet_accountability')
+                GROUP BY jurisdictions.plan_id, jurisdictions.structure_jurisdiction_id
+            ) AS subq
+        ) AS daily_summary ON true
+        GROUP BY jurisdictions.plan_id, jurisdictions.structure_jurisdiction_id
+    ) AS operational_area_query ON operational_area_query.plan_id = plans.identifier
+    LEFT JOIN jurisdictions_tree AS kenya_lite_jurisdictions
+        ON operational_area_query.structure_jurisdiction_id = kenya_lite_jurisdictions.jurisdiction_id
+    LEFT JOIN LATERAL (
+        SELECT
+            SUM(COALESCE(official_population, '0')::INTEGER) as official_population,
+            SUM(COALESCE(other_population, '0')::INTEGER) as other_population
+        FROM kenya_mda_lite_wards_population
+        WHERE kenya_mda_lite_wards_population.jurisdiction_id = kenya_lite_jurisdictions.jurisdiction_id
+        GROUP BY kenya_mda_lite_wards_population.jurisdiction_id
+    ) AS wards_population ON true
+) AS main_query
+WHERE main_query.jurisdiction_depth = 2;
+
+CREATE INDEX IF NOT EXISTS kenya_mda_lite_operational_areas_path_idx_gin on kenya_mda_lite_operational_areas using GIN(jurisdiction_path);
+CREATE INDEX IF NOT EXISTS kenya_mda_lite_operational_areas_plan_idx ON kenya_mda_lite_operational_areas (plan_id);
+CREATE INDEX IF NOT EXISTS kenya_mda_lite_operational_areas_jurisdiction_idx ON kenya_mda_lite_operational_areas (jurisdiction_id);
+CREATE INDEX IF NOT EXISTS kenya_mda_lite_operational_areas_jurisdiction_parent_idx ON kenya_mda_lite_operational_areas (jurisdiction_parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS kenya_mda_lite_operational_areas_idx ON kenya_mda_lite_operational_areas (id);
+
+COMMIT;
