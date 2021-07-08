@@ -1,0 +1,231 @@
+-- Deploy reveal_irs_zambia_2020:fix_geo_queries to pg
+-- requires: reveal_irs_zambia_2019:structure_geo_hierarchy_triggers
+
+BEGIN;
+
+SET search_path TO :"schema",public;
+
+DROP FUNCTION IF EXISTS create_structure_geo_hierarchy;
+
+CREATE OR REPLACE FUNCTION create_structure_geo_hierarchy(the_structure locations, limit_hierarchy BOOLEAN DEFAULT TRUE, max_levels INTEGER DEFAULT 2) RETURNS BOOLEAN AS $$
+-- this function takes a structure (from the locations table) and determines with jurisdiction
+-- Inputs:
+--  the_structure - the structur or structures
+--  limit_hierarchy - whether or not to limit the search to the jurisdiction hierarchy of the location
+--  max_levels - the max number of geographic levels to search through
+-- the structure is located in geographically.  It then inserts a record in the structure_geo_hierarchy
+-- table with this information
+-- NOTE THAT UNITS ARE GEOMETRY - SO DWITHIN USES DEGREES AND 150m / 111111m/deg ~= 0.00135 --
+DECLARE
+    geo_record RECORD;
+BEGIN
+    -- set up a series of CTEs that add the root parent to jurisdictions
+    WITH RECURSIVE parents AS (
+    SELECT
+        id AS id,
+        id AS root_parent
+    FROM jurisdictions
+    WHERE
+        parent_id IS NULL OR parent_id = ''
+    UNION
+    SELECT
+        child.id AS id,
+        coalesce(p.root_parent, child.parent_id) AS root_parent
+    FROM jurisdictions child
+        INNER JOIN parents p ON p.id = child.parent_id
+    ),
+    jurisdictions_with_root AS (
+    SELECT
+        jurisdictions.id,
+        jurisdictions.geographic_level,
+        jurisdictions.geometry,
+        jurisdictions.status,
+        parents.root_parent
+    FROM parents AS parents
+    LEFT JOIN jurisdictions AS jurisdictions
+    ON jurisdictions.id = parents.id)
+    -- use jurisdictions_with_root when doing our queries
+    SELECT DISTINCT ON (locations.id)
+        locations.id AS id,
+        locations.jurisdiction_id AS jurisdiction_id,
+        COALESCE(geo_jurisdictions.geographic_level, jurisdictions.geographic_level) AS jurisdiction_depth,
+        geo_jurisdictions.id AS geo_jurisdiction_id,
+        geo_jurisdictions.geographic_level AS geo_jurisdiction_depth,
+        public.ST_WITHIN(locations.geometry, geo_jurisdictions.geometry) AS geo_strict_within
+    INTO geo_record
+    FROM locations
+    LEFT JOIN jurisdictions_with_root AS jurisdictions
+        ON jurisdictions.id = locations.jurisdiction_id
+    LEFT JOIN jurisdictions_with_root AS geo_jurisdictions
+        ON public.ST_DWITHIN(locations.geometry, geo_jurisdictions.geometry, 150.0 / 111111.0)
+    WHERE
+        geo_jurisdictions.id IS NOT NULL
+        AND geo_jurisdictions.status != 'Inactive'
+        -- ensure we don't search through the largest jurisdictions i.e. we we want to search
+        -- through smaller geographic areas only, for better performance
+        AND (
+            (max_levels IS NULL) OR
+            (max_levels IS NOT NULL AND geo_jurisdictions.geographic_level >= max_levels)
+        )
+        -- ensure the jurisdiction is in the same hierarchy as the structure
+        AND (
+                (limit_hierarchy = FALSE)
+                OR (geo_jurisdictions.root_parent = jurisdictions.root_parent)
+            )
+        AND locations.id = the_structure.id
+    ORDER BY
+        locations.id ASC,
+        geo_jurisdictions.geographic_level DESC,
+        CASE
+            WHEN geo_jurisdictions.id = locations.jurisdiction_id THEN 0
+            ELSE 1
+        END ASC,
+        geo_jurisdictions.id ASC;
+    IF FOUND THEN
+        BEGIN
+            UPDATE structure_geo_hierarchy
+                SET
+                    jurisdiction_id = geo_record.jurisdiction_id,
+                    jurisdiction_depth = geo_record.jurisdiction_depth,
+                    geo_jurisdiction_id = geo_record.geo_jurisdiction_id,
+                    geo_jurisdiction_depth = geo_record.geo_jurisdiction_depth,
+                    geo_strict_within = geo_record.geo_strict_within
+                WHERE id = geo_record.id;
+            IF NOT FOUND THEN
+            INSERT INTO structure_geo_hierarchy
+                VALUES (
+                    geo_record.id,
+                    geo_record.jurisdiction_id,
+                    geo_record.jurisdiction_depth,
+                    geo_record.geo_jurisdiction_id,
+                    geo_record.geo_jurisdiction_depth,
+                    geo_record.geo_strict_within
+                );
+            END IF;
+        END;
+        RETURN TRUE;
+    ELSE
+        RETURN FALSE;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP FUNCTION IF EXISTS process_structure_geo_hierarchy_structure_queue;
+
+CREATE FUNCTION process_structure_geo_hierarchy_structure_queue(num_rows INTEGER DEFAULT 1000, limit_hierarchy BOOLEAN DEFAULT TRUE, max_levels INTEGER DEFAULT 2) RETURNS VOID AS $$
+-- this function processes all the locations in the structure_geo_hierarchy_structure_queue table
+DECLARE
+    structure_row locations%ROWTYPE;
+    structure_row_result BOOLEAN;
+    existing_queries INTEGER;
+BEGIN
+    -- check if we are already running this query
+    SELECT COUNT(*) FROM pg_stat_activity
+    INTO existing_queries
+    WHERE (now() - pg_stat_activity.query_start) > interval '1 minutes'
+    AND query ILIKE '%process_structure_geo_hierarchy_structure_queue%';
+    -- only process the queue if not already doing it
+    IF existing_queries < 1 THEN
+        FOR structure_row IN
+            -- first get the relevant locations
+            SELECT locations.*
+            FROM structure_geo_hierarchy_structure_queue
+            LEFT JOIN locations
+            ON locations.id = structure_geo_hierarchy_structure_queue.structure_id
+            LIMIT (num_rows)
+        LOOP
+            -- next lets process them
+            SELECT create_structure_geo_hierarchy(structure_row, limit_hierarchy, max_levels) INTO structure_row_result;
+            IF FOUND AND structure_row_result THEN
+                -- finally delete the locations from the queue
+                DELETE FROM structure_geo_hierarchy_structure_queue
+                WHERE structure_id = structure_row.id;
+            END IF;
+        END LOOP;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP FUNCTION IF EXISTS process_structure_geo_hierarchy_full;
+
+CREATE OR REPLACE FUNCTION process_structure_geo_hierarchy_full(limit_hierarchy BOOLEAN DEFAULT TRUE, max_levels INTEGER DEFAULT 2) RETURNS VOID AS $$
+-- this function is used when we need to reprocess all locations
+-- Inputs
+--    max_levels - optionally limit the jurisdiction geograpic levels to search through
+-- WARNING: this is an expensive query!!
+BEGIN
+    -- first drop structure_geo_hierarchy_full
+    DROP MATERIALIZED VIEW IF EXISTS structure_geo_hierarchy_full;
+    -- then recreate it
+    CREATE MATERIALIZED VIEW structure_geo_hierarchy_full AS
+    -- set up a series of CTEs that add the root parent to jurisdictions
+    WITH RECURSIVE parents AS (
+    SELECT
+        id AS id,
+        id AS root_parent
+    FROM jurisdictions
+    WHERE
+        parent_id IS NULL OR parent_id = ''
+    UNION
+    SELECT
+        child.id AS id,
+        coalesce(p.root_parent, child.parent_id) AS root_parent
+    FROM jurisdictions child
+        INNER JOIN parents p ON p.id = child.parent_id
+    ),
+    jurisdictions_with_root AS (
+    SELECT
+        jurisdictions.id,
+        jurisdictions.geographic_level,
+        jurisdictions.geometry,
+        jurisdictions.status,
+        parents.root_parent
+    FROM parents AS parents
+    LEFT JOIN jurisdictions AS jurisdictions
+    ON jurisdictions.id = parents.id)
+    -- use jurisdictions_with_root when doing our queries
+    SELECT DISTINCT ON (locations.id)
+        locations.id AS id,
+        locations.jurisdiction_id AS jurisdiction_id,
+        COALESCE(geo_jurisdictions.geographic_level, jurisdictions.geographic_level) AS jurisdiction_depth,
+        geo_jurisdictions.id AS geo_jurisdiction_id,
+        geo_jurisdictions.geographic_level AS geo_jurisdiction_depth,
+        public.ST_WITHIN(locations.geometry, geo_jurisdictions.geometry) AS geo_strict_within
+    FROM locations
+    LEFT JOIN jurisdictions_with_root AS jurisdictions
+        ON jurisdictions.id = locations.jurisdiction_id
+    LEFT JOIN jurisdictions_with_root AS geo_jurisdictions
+        ON public.ST_DWITHIN(locations.geometry, geo_jurisdictions.geometry, 150.0 / 111111.0)
+    WHERE
+        geo_jurisdictions.id IS NOT NULL
+        AND geo_jurisdictions.status != 'Inactive'
+        -- ensure we don't search through the largest jurisdictions i.e. we we want to search
+        -- through smaller geographic areas only, for better performance
+        AND (
+            (max_levels IS NULL) OR
+            (max_levels IS NOT NULL AND geo_jurisdictions.geographic_level >= max_levels)
+        )
+        -- ensure the jurisdiction is in the same hierarchy as the structure
+        AND (
+            (limit_hierarchy = FALSE)
+            OR (geo_jurisdictions.root_parent = jurisdictions.root_parent)
+        )
+    ORDER BY
+        locations.id ASC,
+        geo_jurisdictions.geographic_level DESC,
+        CASE
+            WHEN geo_jurisdictions.id = locations.jurisdiction_id THEN 0
+            ELSE 1
+        END ASC,
+        geo_jurisdictions.id ASC;
+    -- empty structure_geo_hierarchy
+    TRUNCATE structure_geo_hierarchy;
+    -- repopulatestructure_geo_hierarchy
+    INSERT INTO structure_geo_hierarchy SELECT * from structure_geo_hierarchy_full;
+    -- empty the queues
+    DELETE FROM structure_geo_hierarchy_structure_queue WHERE structure_id IN (SELECT id FROM structure_geo_hierarchy);
+    TRUNCATE structure_geo_hierarchy_jurisdiction_queue;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMIT;

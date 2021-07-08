@@ -1,0 +1,10 @@
+-- Revert reveal_irs_zambia_2020:fix_geo_queries from pg
+
+BEGIN;
+
+SET search_path TO :"schema",public;
+
+DROP FUNCTION create_structure_geo_hierarchy(locations, INTEGER);
+DROP FUNCTION process_structure_geo_hierarchy_full(INTEGER);
+
+COMMIT;
